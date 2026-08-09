@@ -1,77 +1,75 @@
-name: AstroMinute - Generer la video
-
-on:
-  workflow_dispatch:
-    inputs:
-      payload:
-        description: "JSON AstroMinute genere par Make (laisser vide pour un test)"
-        required: false
-        type: string
-
-permissions:
-  contents: read
-
-jobs:
-  generate:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      HOROSCOPE_JSON: ${{ inputs.payload }}
-      CLOUDINARY_URL: ${{ secrets.CLOUDINARY_URL }}
-      MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Decompresser AstroMinute
-        run: |
-          mkdir -p app
-          unzip -q AstroMinute_AutoGenerator_v2.zip -d app
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Installer FFmpeg et polices
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-dejavu-core fonts-noto-core
-
-      - name: Installer Python
-        working-directory: app
-        run: pip install -r requirements.txt
-
-      - name: Preparer les donnees
-        working-directory: app
-        run: |
-          python - <<'PY'
-          import json, os, pathlib
-          raw = os.environ.get('HOROSCOPE_JSON','').strip()
-          target = pathlib.Path('data/input.json')
-          if raw:
-              obj = json.loads(raw)
-              target.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding='utf-8')
-              print('JSON Make utilise.')
-          else:
-              target.write_text(pathlib.Path('data/sample.json').read_text(encoding='utf-8'), encoding='utf-8')
-              print('Mode test: sample.json utilise.')
-          PY
-
-      - name: Generer la video 1080x1920
-        working-directory: app
-        run: python generator.py --input data/input.json
-
-      - name: Conserver le MP4 comme artefact GitHub
-        uses: actions/upload-artifact@v4
-        with:
-          name: astrominute-video
-          path: |
-            app/output/*.mp4
-            app/output/publish.json
-          retention-days: 7
-
       - name: Upload Cloudinary et retour Make (optionnel)
         working-directory: app
         run: |
-          sed -i '/cloudinary.config(cloudinary_url=cloudinary_url)/d' publish.py
-          python publish.py
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import urlparse, unquote
+
+          import cloudinary
+          import cloudinary.uploader
+          import requests
+
+          raw = os.environ.get("CLOUDINARY_URL", "").strip()
+
+          if "cloudinary://" not in raw:
+              raise RuntimeError("CLOUDINARY_URL absent ou invalide")
+
+          raw = raw[raw.index("cloudinary://"):]
+          parsed = urlparse(raw)
+
+          cloud_name = parsed.hostname or ""
+          api_key = unquote(parsed.username or "")
+          api_secret = unquote(parsed.password or "")
+
+          if not cloud_name or not api_key or not api_secret:
+              raise RuntimeError(
+                  "CLOUDINARY_URL ne contient pas cloud_name/api_key/api_secret"
+              )
+
+          cloudinary.config(
+              cloud_name=cloud_name,
+              api_key=api_key,
+              api_secret=api_secret,
+              secure=True
+          )
+
+          root = Path.cwd()
+
+          meta = json.loads(
+              (root / "output" / "publish.json").read_text(encoding="utf-8")
+          )
+
+          video = Path(meta["video"])
+          date = (meta.get("date") or "jour").replace("/", "-")
+
+          result = cloudinary.uploader.upload_large(
+              str(video),
+              resource_type="video",
+              public_id=f"astrominute/{date}",
+              overwrite=True
+          )
+
+          video_url = result["secure_url"]
+
+          print("Cloudinary upload OK")
+
+          webhook = os.environ.get("MAKE_WEBHOOK_URL", "").strip()
+
+          if webhook:
+              payload = {
+                  **meta,
+                  "video_url": video_url
+              }
+
+              response = requests.post(
+                  webhook,
+                  json=payload,
+                  timeout=30
+              )
+
+              response.raise_for_status()
+
+              print("Webhook Make envoyé:", response.status_code)
+          PY
