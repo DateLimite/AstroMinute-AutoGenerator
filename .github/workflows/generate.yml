@@ -72,4 +72,6 @@ jobs:
 
       - name: Upload Cloudinary et retour Make (optionnel)
         working-directory: app
-        run: python publish.py
+        run: |
+          sed -i '/cloudinary.config(cloudinary_url=cloudinary_url)/d' publish.py
+          python publish.py
