@@ -1,4 +1,144 @@
-      - name: Upload Cloudinary et retour Make (optionnel)
+name: AstroMinute - Generer la video
+
+on:
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: "JSON AstroMinute genere par Make (laisser vide pour un test)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      HOROSCOPE_JSON: ${{ inputs.payload }}
+      CLOUDINARY_URL: ${{ secrets.CLOUDINARY_URL }}
+      MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+
+    steps:
+      # ------------------------------------------------------------
+      # 1. Recuperer le depot
+      # ------------------------------------------------------------
+      - name: Recuperer le depot
+        uses: actions/checkout@v4
+
+      # ------------------------------------------------------------
+      # 2. Decompresser le generateur AstroMinute
+      # ------------------------------------------------------------
+      - name: Decompresser AstroMinute
+        run: |
+          mkdir -p app
+          unzip -q -o AstroMinute_AutoGenerator_v2.zip -d app
+
+          echo "Verification des fichiers..."
+          test -f app/generator.py
+          test -f app/requirements.txt
+          test -f app/data/sample.json
+
+      # ------------------------------------------------------------
+      # 3. Installer Python
+      # ------------------------------------------------------------
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # ------------------------------------------------------------
+      # 4. Installer FFmpeg et les polices
+      # ------------------------------------------------------------
+      - name: Installer FFmpeg et polices
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-dejavu-core fonts-noto-core
+
+      # ------------------------------------------------------------
+      # 5. Installer les dependances Python
+      # ------------------------------------------------------------
+      - name: Installer les dependances Python
+        working-directory: app
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # ------------------------------------------------------------
+      # 6. Recuperer l'horoscope envoye par Make
+      #    Si aucun JSON n'est fourni, utilisation du fichier exemple
+      # ------------------------------------------------------------
+      - name: Preparer les donnees horoscope
+        working-directory: app
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = os.environ.get("HOROSCOPE_JSON", "").strip()
+          target = Path("data/input.json")
+
+          if raw:
+              try:
+                  obj = json.loads(raw)
+
+                  if len(obj.get("signes", [])) != 12:
+                      raise ValueError("Le JSON doit contenir exactement 12 signes.")
+
+                  target.write_text(
+                      json.dumps(
+                          obj,
+                          ensure_ascii=False,
+                          indent=2
+                      ),
+                      encoding="utf-8"
+                  )
+
+                  print("Horoscope recu depuis Make.")
+                  print("Date :", obj.get("date"))
+                  print("Titre :", obj.get("titre"))
+
+              except Exception as exc:
+                  print("Erreur JSON Make :", exc)
+                  raise
+
+          else:
+              target.write_text(
+                  Path("data/sample.json").read_text(encoding="utf-8"),
+                  encoding="utf-8"
+              )
+
+              print("Mode TEST : sample.json utilise.")
+          PY
+
+      # ------------------------------------------------------------
+      # 7. Generer la video verticale 1080x1920
+      # ------------------------------------------------------------
+      - name: Generer la video AstroMinute
+        working-directory: app
+        run: |
+          python generator.py --input data/input.json
+
+      # ------------------------------------------------------------
+      # 8. Conserver une copie dans GitHub Actions
+      # ------------------------------------------------------------
+      - name: Conserver la video comme artefact GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: astrominute-video
+          path: |
+            app/output/*.mp4
+            app/output/publish.json
+          retention-days: 7
+
+      # ------------------------------------------------------------
+      # 9. Envoyer la video sur Cloudinary
+      #    puis transmettre l'URL a Make
+      # ------------------------------------------------------------
+      - name: Upload Cloudinary et retour Make
         working-directory: app
         run: |
           python - <<'PY'
@@ -11,22 +151,47 @@
           import cloudinary.uploader
           import requests
 
+          # --------------------------------------------------------
+          # Lire CLOUDINARY_URL
+          # Format attendu :
+          # cloudinary://API_KEY:API_SECRET@CLOUD_NAME
+          # --------------------------------------------------------
+
           raw = os.environ.get("CLOUDINARY_URL", "").strip()
 
-          if "cloudinary://" not in raw:
-              raise RuntimeError("CLOUDINARY_URL absent ou invalide")
+          if not raw:
+              raise RuntimeError(
+                  "Le secret GitHub CLOUDINARY_URL est absent."
+              )
 
-          raw = raw[raw.index("cloudinary://"):]
+          if not raw.startswith("cloudinary://"):
+              raise RuntimeError(
+                  "CLOUDINARY_URL doit commencer par cloudinary://"
+              )
+
           parsed = urlparse(raw)
 
           cloud_name = parsed.hostname or ""
           api_key = unquote(parsed.username or "")
           api_secret = unquote(parsed.password or "")
 
-          if not cloud_name or not api_key or not api_secret:
-              raise RuntimeError(
-                  "CLOUDINARY_URL ne contient pas cloud_name/api_key/api_secret"
-              )
+          if not cloud_name:
+              raise RuntimeError("Cloud name Cloudinary introuvable.")
+
+          if not api_key:
+              raise RuntimeError("API Key Cloudinary introuvable.")
+
+          if not api_secret:
+              raise RuntimeError("API Secret Cloudinary introuvable.")
+
+          print("Configuration Cloudinary detectee.")
+          print("Cloud name :", cloud_name)
+          print("API Key presente : OUI")
+          print("API Secret presente : OUI")
+
+          # --------------------------------------------------------
+          # Configuration Cloudinary
+          # --------------------------------------------------------
 
           cloudinary.config(
               cloud_name=cloud_name,
@@ -35,41 +200,129 @@
               secure=True
           )
 
+          # --------------------------------------------------------
+          # Lire les informations de publication
+          # --------------------------------------------------------
+
           root = Path.cwd()
 
+          publish_file = root / "output" / "publish.json"
+
+          if not publish_file.exists():
+              raise RuntimeError(
+                  "output/publish.json introuvable."
+              )
+
           meta = json.loads(
-              (root / "output" / "publish.json").read_text(encoding="utf-8")
+              publish_file.read_text(encoding="utf-8")
           )
 
           video = Path(meta["video"])
-          date = (meta.get("date") or "jour").replace("/", "-")
+
+          if not video.is_absolute():
+              video = root / video
+
+          if not video.exists():
+              # Secours : rechercher directement le MP4
+              videos = list((root / "output").glob("*.mp4"))
+
+              if not videos:
+                  raise RuntimeError(
+                      "Aucune video MP4 generee."
+                  )
+
+              video = videos[0]
+
+          print("Video trouvee :", video.name)
+          print(
+              "Taille :",
+              round(video.stat().st_size / 1024 / 1024, 2),
+              "Mo"
+          )
+
+          # --------------------------------------------------------
+          # Nom du fichier Cloudinary
+          # --------------------------------------------------------
+
+          date = str(meta.get("date") or "jour")
+
+          safe_date = (
+              date.replace("/", "-")
+                  .replace(" ", "-")
+          )
+
+          # --------------------------------------------------------
+          # Upload de la video
+          # --------------------------------------------------------
+
+          print("Upload vers Cloudinary...")
 
           result = cloudinary.uploader.upload_large(
               str(video),
               resource_type="video",
-              public_id=f"astrominute/{date}",
-              overwrite=True
+              public_id=f"astrominute/{safe_date}",
+              overwrite=True,
+              chunk_size=6000000
           )
 
-          video_url = result["secure_url"]
+          video_url = result.get("secure_url")
 
-          print("Cloudinary upload OK")
-
-          webhook = os.environ.get("MAKE_WEBHOOK_URL", "").strip()
-
-          if webhook:
-              payload = {
-                  **meta,
-                  "video_url": video_url
-              }
-
-              response = requests.post(
-                  webhook,
-                  json=payload,
-                  timeout=30
+          if not video_url:
+              raise RuntimeError(
+                  "Cloudinary n'a pas retourne de secure_url."
               )
 
-              response.raise_for_status()
+          print("Cloudinary upload OK")
+          print("Video URL obtenue.")
 
-              print("Webhook Make envoyé:", response.status_code)
+          # --------------------------------------------------------
+          # Envoyer le resultat au Webhook Make
+          # --------------------------------------------------------
+
+          webhook = os.environ.get(
+              "MAKE_WEBHOOK_URL",
+              ""
+          ).strip()
+
+          if not webhook:
+              raise RuntimeError(
+                  "Le secret MAKE_WEBHOOK_URL est absent."
+              )
+
+          payload = {
+              "date": meta.get("date"),
+              "title": meta.get("title"),
+              "caption": meta.get("caption"),
+              "duration": meta.get("duration"),
+              "video_url": video_url
+          }
+
+          print("Envoi vers Make...")
+
+          response = requests.post(
+              webhook,
+              json=payload,
+              timeout=30
+          )
+
+          print(
+              "Webhook Make status :",
+              response.status_code
+          )
+
+          response.raise_for_status()
+
+          print("Webhook Make envoye avec succes.")
           PY
+
+      # ------------------------------------------------------------
+      # 10. Fin
+      # ------------------------------------------------------------
+      - name: Termine
+        run: |
+          echo "=========================================="
+          echo "AstroMinute termine avec succes"
+          echo "Video generee"
+          echo "Video envoyee sur Cloudinary"
+          echo "Webhook Make appele"
+          echo "=========================================="
