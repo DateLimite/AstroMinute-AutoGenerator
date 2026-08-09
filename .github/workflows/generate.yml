@@ -18,7 +18,9 @@ jobs:
 
     env:
       HOROSCOPE_JSON: ${{ inputs.payload }}
-      CLOUDINARY_URL: ${{ secrets.CLOUDINARY_URL }}
+      CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+      CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+      CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
       MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
 
     steps:
@@ -145,49 +147,29 @@ jobs:
           import json
           import os
           from pathlib import Path
-          from urllib.parse import urlparse, unquote
 
           import cloudinary
           import cloudinary.uploader
           import requests
 
           # --------------------------------------------------------
-          # Lire CLOUDINARY_URL
-          # Format attendu :
-          # cloudinary://API_KEY:API_SECRET@CLOUD_NAME
+          # Lire les trois secrets Cloudinary separes
           # --------------------------------------------------------
 
-          raw = os.environ.get("CLOUDINARY_URL", "").strip()
-
-          if not raw:
-              raise RuntimeError(
-                  "Le secret GitHub CLOUDINARY_URL est absent."
-              )
-
-          if not raw.startswith("cloudinary://"):
-              raise RuntimeError(
-                  "CLOUDINARY_URL doit commencer par cloudinary://"
-              )
-
-          parsed = urlparse(raw)
-
-          cloud_name = parsed.hostname or ""
-          api_key = unquote(parsed.username or "")
-          api_secret = unquote(parsed.password or "")
+          cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME", "").strip()
+          api_key = os.environ.get("CLOUDINARY_API_KEY", "").strip()
+          api_secret = os.environ.get("CLOUDINARY_API_SECRET", "").strip()
 
           if not cloud_name:
-              raise RuntimeError("Cloud name Cloudinary introuvable.")
+              raise RuntimeError("Le secret GitHub CLOUDINARY_CLOUD_NAME est absent.")
 
           if not api_key:
-              raise RuntimeError("API Key Cloudinary introuvable.")
+              raise RuntimeError("Le secret GitHub CLOUDINARY_API_KEY est absent.")
 
           if not api_secret:
-              raise RuntimeError("API Secret Cloudinary introuvable.")
+              raise RuntimeError("Le secret GitHub CLOUDINARY_API_SECRET est absent.")
 
           print("Configuration Cloudinary detectee.")
-          print("Cloud name :", cloud_name)
-          print("API Key presente : OUI")
-          print("API Secret presente : OUI")
 
           # --------------------------------------------------------
           # Configuration Cloudinary
